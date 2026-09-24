@@ -9,12 +9,26 @@ PORT = int(os.environ.get("PORT", 8000))
 HOST = os.environ.get("HOST", "0.0.0.0")
 
 # Auto-detect public URL from Railway, Render, Koyeb or manual PUBLIC_URL
-PUBLIC_URL = (
-    os.environ.get("PUBLIC_URL")
-    or os.environ.get("RAILWAY_STATIC_URL")
-    or os.environ.get("RENDER_EXTERNAL_URL")
-    or os.environ.get("KOYEB_PUBLIC_DOMAIN")
-)
+def _detect_public_url() -> Optional[str]:
+    # 1. Manual override always wins
+    manual = os.environ.get("PUBLIC_URL")
+    if manual:
+        return manual.rstrip("/")
+    # 2. Railway: RAILWAY_PUBLIC_DOMAIN gives just the domain (no scheme)
+    rail = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    if rail:
+        return f"https://{rail}"
+    # 3. Render: RENDER_EXTERNAL_URL already includes https://
+    render = os.environ.get("RENDER_EXTERNAL_URL")
+    if render:
+        return render.rstrip("/")
+    # 4. Koyeb: KOYEB_PUBLIC_DOMAIN gives just the domain
+    koyeb = os.environ.get("KOYEB_PUBLIC_DOMAIN")
+    if koyeb:
+        return f"https://{koyeb}"
+    return None
+
+PUBLIC_URL = _detect_public_url()
 
 # ==========================================
 # 2. MONGODB CACHING CONFIGURATION
