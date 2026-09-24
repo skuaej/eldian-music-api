@@ -155,7 +155,7 @@ def get_ydl_opts(proxy: Optional[str] = None, cookiefile: Optional[str] = None, 
         "no_warnings": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["web_embedded", "web_safari", "android"]
+                "player_client": ["web_embedded", "web_creator"]
             }
         },
         "js_runtimes": {
@@ -163,6 +163,7 @@ def get_ydl_opts(proxy: Optional[str] = None, cookiefile: Optional[str] = None, 
             "deno": {}
         },
         "skip_download": True,
+        "ignore_no_formats_error": True,
     }
 
     if proxy:
