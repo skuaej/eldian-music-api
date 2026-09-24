@@ -159,7 +159,8 @@ def get_ydl_opts(proxy: Optional[str] = None, cookiefile: Optional[str] = None, 
             }
         },
         "js_runtimes": {
-            "node": {}
+            "node": {},
+            "deno": {}
         },
         "skip_download": True,
     }
