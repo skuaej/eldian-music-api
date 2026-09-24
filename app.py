@@ -802,16 +802,17 @@ def stream_video_with_sound(
     if background_tasks:
         background_tasks.add_task(cleanup_old_temp_files)
 
-    # 1. Zero-load fast path: if progressive format (audio+video in one file) is in cache, stream directly!
+    # 1. Zero-load fast path: if progressive format (audio+video in one file) is in cache for 720p or lower
     cached = get_cached_metadata(url)
     if cached:
         height_map = {"8k": 4320, "4k": 2160, "2k": 1440, "1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
         q_clean = quality.lower().strip()
         h_req = height_map.get(q_clean, 720)
-        for cf in cached.get("combined_formats", []):
-            cf_h = cf.get("height") or 0
-            if cf_h <= h_req and cf.get("url"):
-                return proxy_raw_stream(cf.get("url"), request)
+        if h_req <= 720:
+            for cf in cached.get("combined_formats", []):
+                cf_h = cf.get("height") or 0
+                if cf_h == h_req and cf.get("url"):
+                    return proxy_raw_stream(cf.get("url"), request)
 
     # 2. DASH muxed streaming for 1080p, 2k, 4k, 8k
     try:
