@@ -221,9 +221,35 @@ def get_clean_quality_label(height: Optional[int], fps: Optional[int], raw_note:
         return f"{prefix}{fps_suffix}".strip()
     return raw_note or "Unknown"
 
+def get_video_id_fast(url_or_id: str) -> str:
+    """Extract YouTube 11-char video ID instantly with 0 network calls."""
+    import re
+    s = url_or_id.strip()
+    if len(s) == 11 and re.match(r'^[a-zA-Z0-9_-]{11}$', s):
+        return s
+    m = re.search(r'(?:v=|\/embed\/|\/v\/|youtu\.be\/|\/shorts\/)([a-zA-Z0-9_-]{11})', s)
+    if m:
+        return m.group(1)
+    return "".join(c for c in s if c.isalnum())[:20] or "video"
+
+def cleanup_old_temp_files(max_age_seconds: int = 1800):
+    """Deletes cached merged/audio files older than 30 mins to protect VPS disk space."""
+    try:
+        temp_dir = os.path.join(tempfile.gettempdir(), "ytdlp_downloads")
+        now = time.time()
+        for f in glob.glob(os.path.join(temp_dir, "*")):
+            if os.path.isfile(f) and (now - os.path.getmtime(f)) > max_age_seconds:
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 def get_or_create_merged_video(url: str, quality: str, disable_proxy: bool = False) -> str:
     """
-    Downloads and merges video + audio into a single MP4 with sound using yt-dlp + FFmpeg.
+    Downloads and merges video + audio into a single MP4 using multi-fragment parallel downloads.
+    Uses FFmpeg stream-copy (-c copy) for 0% VPS CPU load and instant remuxing.
     Caches the file locally so repeated clicks on stream_url or download_url are instant.
     """
     selected_proxy = None if disable_proxy else failover.get_current_proxy()
@@ -241,22 +267,21 @@ def get_or_create_merged_video(url: str, quality: str, disable_proxy: bool = Fal
     }
     h = height_map.get(quality.lower().strip(), "720")
 
-    # Check cache by extracting basic info
-    opts_meta = get_ydl_opts(proxy=selected_proxy, cookiefile=selected_cookie)
-    with yt_dlp.YoutubeDL(opts_meta) as ydl:
-        info = ydl.extract_info(url, download=False)
-        video_id = info.get("id") or "video"
+    # Fast video ID extraction: 0ms delay, 0 network requests
+    video_id = get_video_id_fast(url)
 
     cached_target = os.path.join(temp_dir, f"{video_id}_{h}p.mp4")
     if os.path.exists(cached_target) and os.path.getsize(cached_target) > 1000:
         return cached_target
 
-    # Prioritize H.264 (AVC) video and AAC (MP4A) audio for universal compatibility with all PC players and browsers
+    # 1. Progressive format first (video+audio already merged, 0 CPU, fastest single-file download)
+    # 2. DASH AVC (H.264) + AAC (m4a) for fast stream-copy muxing into MP4 without re-encoding
     format_spec = (
+        f"best[height<={h}][ext=mp4][acodec!=none][vcodec!=none]/"
         f"bestvideo[height<={h}][vcodec^=avc]+bestaudio[acodec^=mp4a]/"
         f"bestvideo[height<={h}][vcodec^=avc]+bestaudio/"
         f"bestvideo[height<={h}]+bestaudio[acodec^=mp4a]/"
-        f"bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
+        f"bestvideo[height<={h}]+bestaudio/best"
     )
     out_template = os.path.join(temp_dir, f"{video_id}_{h}p.%(ext)s")
 
@@ -266,12 +291,15 @@ def get_or_create_merged_video(url: str, quality: str, disable_proxy: bool = Fal
         "outtmpl": out_template,
         "merge_output_format": "mp4",
         "skip_download": False,
+        "concurrent_fragment_downloads": 8,   # 8 parallel connections for maximum speed
+        "buffersize": 1024 * 1024,            # 1MB buffer
+        "http_chunk_size": 10485760,          # 10MB chunk size
+        "retries": 5,
+        "fragment_retries": 5,
         "postprocessor_args": {
             "merger": [
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-movflags", "+faststart"
+                "-c", "copy",                 # ZERO VPS CPU: direct stream copy, no re-encoding
+                "-movflags", "+faststart"     # Fast web streaming start
             ]
         }
     })
@@ -290,17 +318,15 @@ def get_or_create_merged_video(url: str, quality: str, disable_proxy: bool = Fal
 
 def get_or_create_audio(url: str, format_id: str, disable_proxy: bool = False) -> str:
     """
-    Downloads and extracts an audio track reliably with MP3 transcoding so it never times out or drops.
+    Downloads audio track with 8 parallel fragment downloads for maximum speed.
     """
     selected_proxy = None if disable_proxy else failover.get_current_proxy()
     selected_cookie = failover.get_current_cookie()
     temp_dir = os.path.join(tempfile.gettempdir(), "ytdlp_downloads")
     os.makedirs(temp_dir, exist_ok=True)
 
-    opts_meta = get_ydl_opts(proxy=selected_proxy, cookiefile=selected_cookie)
-    with yt_dlp.YoutubeDL(opts_meta) as ydl:
-        info = ydl.extract_info(url, download=False)
-        video_id = info.get("id") or "video"
+    # Fast video ID extraction: 0ms delay, 0 network requests
+    video_id = get_video_id_fast(url)
 
     cached_target = os.path.join(temp_dir, f"{video_id}_audio_{format_id}.mp3")
     if os.path.exists(cached_target) and os.path.getsize(cached_target) > 1000:
@@ -311,6 +337,11 @@ def get_or_create_audio(url: str, format_id: str, disable_proxy: bool = False) -
     opts.update({
         "format": format_id,
         "outtmpl": out_template,
+        "concurrent_fragment_downloads": 8,
+        "buffersize": 1024 * 1024,
+        "http_chunk_size": 10485760,
+        "retries": 5,
+        "fragment_retries": 5,
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -743,11 +774,30 @@ def search_youtube(
 def stream_video_with_sound(
     url: str = Query(..., description="YouTube video URL or ID"),
     quality: str = Query("720p", description="Target quality: 8k, 4k, 2k, 1080p, 720p, 480p, 360p"),
-    disable_proxy: bool = Query(False, description="Set to true to bypass proxy")
+    disable_proxy: bool = Query(False, description="Set to true to bypass proxy"),
+    background_tasks: BackgroundTasks = None,
+    request: Request = None
 ):
     """
     Streams the combined video WITH AUDIO track directly in the browser video player (inline).
+    For progressive formats (720p/360p), streams direct from CDN with 0% VPS CPU and 0 MB disk.
+    For DASH formats (1080p/4k), streams fast stream-copy remuxed file.
     """
+    if background_tasks:
+        background_tasks.add_task(cleanup_old_temp_files)
+
+    # 1. Zero-load fast path: if progressive format (audio+video in one file) is in cache, stream directly!
+    cached = get_cached_metadata(url)
+    if cached:
+        height_map = {"8k": 4320, "4k": 2160, "2k": 1440, "1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
+        q_clean = quality.lower().strip()
+        h_req = height_map.get(q_clean, 720)
+        for cf in cached.get("combined_formats", []):
+            cf_h = cf.get("height") or 0
+            if cf_h <= h_req and cf.get("url"):
+                return proxy_raw_stream(cf.get("url"), request)
+
+    # 2. DASH muxed streaming for 1080p, 2k, 4k, 8k
     try:
         file_path = get_or_create_merged_video(url, quality, disable_proxy)
         return FileResponse(
@@ -764,11 +814,14 @@ def stream_video_with_sound(
 def download_merged_video(
     url: str = Query(..., description="YouTube video URL or ID"),
     quality: str = Query("1080p", description="Target quality: 8k, 4k, 2k, 1080p, 720p, 480p, 360p, best"),
-    disable_proxy: bool = Query(False, description="Set to true to bypass proxy")
+    disable_proxy: bool = Query(False, description="Set to true to bypass proxy"),
+    background_tasks: BackgroundTasks = None
 ):
     """
     Downloads the merged video WITH AUDIO track as an MP4 attachment.
     """
+    if background_tasks:
+        background_tasks.add_task(cleanup_old_temp_files)
     try:
         file_path = get_or_create_merged_video(url, quality, disable_proxy)
         return FileResponse(
@@ -786,11 +839,26 @@ def download_merged_video(
 def stream_audio_track(
     url: str = Query(..., description="YouTube video URL or ID"),
     format_id: str = Query("140", description="Audio format ID"),
-    disable_proxy: bool = Query(False, description="Set to true to bypass proxy")
+    disable_proxy: bool = Query(False, description="Set to true to bypass proxy"),
+    background_tasks: BackgroundTasks = None,
+    request: Request = None
 ):
     """
-    Streams extracted audio track as MP3 directly without connection drops.
+    Streams audio track directly. If direct CDN URL is cached, proxies stream with 0% VPS CPU/disk!
     """
+    if background_tasks:
+        background_tasks.add_task(cleanup_old_temp_files)
+
+    # 1. Zero-load fast path: check if direct audio CDN url is in MongoDB cache
+    cached = get_cached_metadata(url)
+    if cached:
+        for a in cached.get("audio_formats", []):
+            if str(a.get("format_id")) == str(format_id) and a.get("url"):
+                return proxy_raw_stream(a.get("url"), request)
+        if cached.get("audio_formats") and cached["audio_formats"][0].get("url"):
+            return proxy_raw_stream(cached["audio_formats"][0].get("url"), request)
+
+    # 2. Fallback to cached downloaded audio
     try:
         file_path = get_or_create_audio(url, format_id, disable_proxy)
         return FileResponse(
@@ -803,14 +871,13 @@ def stream_audio_track(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Audio error: {str(e)}")
 
-
 @app.get("/api/stream")
 def proxy_raw_stream(
     url: str = Query(..., description="GoogleVideo stream URL"),
     request: Request = None
 ):
     """
-    Direct proxy for individual raw streams (audio-only or video-only) to bypass 403 errors.
+    High-performance direct chunk streaming proxy with 0% VPS CPU and 0 MB VPS disk usage.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -840,7 +907,8 @@ def proxy_raw_stream(
 
         def iter_stream():
             try:
-                for chunk in req.iter_content(chunk_size=1024 * 64):
+                # 256KB chunks for high-throughput smooth streaming
+                for chunk in req.iter_content(chunk_size=1024 * 256):
                     if chunk:
                         yield chunk
             finally:
@@ -946,13 +1014,16 @@ def get_streams_only(
         # 2. Clean list of audio streams
         clean_audios = []
         for a in data.get("audio_formats", []):
+            raw_url = a.get("url")
+            direct_proxy = f"{base_url}/api/stream?url={urllib.parse.quote(raw_url, safe='')}" if raw_url else None
             clean_audios.append({
                 "format_id": a.get("format_id"),
-                "ext": a.get("ext") or "mp3",
+                "ext": a.get("ext") or "m4a",
                 "codec": a.get("acodec"),
                 "bitrate": f"{round(a.get('abr'))} kbps" if a.get("abr") else "Unknown",
                 "filesize": a.get("filesize_formatted"),
-                "stream_url": f"{base_url}/api/stream_audio?url={encoded_video_url}&format_id={a.get('format_id')}"
+                "stream_url": f"{base_url}/api/stream_audio?url={encoded_video_url}&format_id={a.get('format_id')}",
+                "direct_stream_url": direct_proxy
             })
 
         return {

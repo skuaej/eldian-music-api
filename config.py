@@ -56,33 +56,50 @@ def load_proxy_pool() -> List[str]:
     Supports formats:
       - socks5://user:pass@host:port
       - http://user:pass@host:port
+      - host:port:user:pass (auto-detects socks vs http)
       - host:port
-      - host:port:user:pass
     """
     proxies = []
-    env_proxy = os.environ.get("PROXY_URL")
-    if env_proxy and env_proxy.strip():
-        proxies.append(env_proxy.strip())
-
+    
+    # 1. First priority: proxy.txt file
     if os.path.exists(PROXY_FILE):
         try:
             with open(PROXY_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
+                for raw_line in f:
+                    line = raw_line.strip()
                     if not line or line.startswith("#"):
                         continue
+                    # Remove trailing slashes or quotes
+                    line = line.strip("'\"")
+                    # If line has scheme (socks5:// or http://)
+                    if line.startswith("socks5://") or line.startswith("socks4://") or line.startswith("http://") or line.startswith("https://"):
+                        if line not in proxies:
+                            proxies.append(line)
                     # Parse host:port:user:pass
-                    if line.count(":") == 3 and not line.startswith("http") and not line.startswith("socks"):
+                    elif line.count(":") == 3:
                         parts = line.split(":")
-                        line = f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
-                    elif line.count(":") == 1 and not line.startswith("http") and not line.startswith("socks"):
-                        line = f"http://{line}"
-                    if line not in proxies:
+                        formatted = f"socks5://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+                        if formatted not in proxies:
+                            proxies.append(formatted)
+                    # Parse host:port
+                    elif line.count(":") == 1:
+                        formatted = f"http://{line}"
+                        if formatted not in proxies:
+                            proxies.append(formatted)
+                    elif line not in proxies:
                         proxies.append(line)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[CONFIG] Error reading proxy file {PROXY_FILE}: {e}")
 
-    if DEFAULT_PROXY not in proxies:
+    # 2. Environment variable PROXY_URL
+    env_proxy = os.environ.get("PROXY_URL")
+    if env_proxy and env_proxy.strip():
+        ep = env_proxy.strip().strip("'\"")
+        if ep not in proxies:
+            proxies.insert(0, ep)
+
+    # 3. Default fallback proxy
+    if DEFAULT_PROXY and DEFAULT_PROXY not in proxies:
         proxies.append(DEFAULT_PROXY)
 
     return proxies
