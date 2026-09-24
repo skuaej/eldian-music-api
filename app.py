@@ -8,8 +8,15 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Query, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from pydantic import BaseModel
+import time
 import requests
 import yt_dlp
+import pymongo
+from pymongo.errors import PyMongoError
+from config import (
+    PORT, HOST, PUBLIC_URL, MONGO_URI, MONGO_DB_NAME, MONGO_COLLECTION_NAME,
+    CACHE_EXPIRY_SECONDS, load_proxy_pool, load_cookie_pool
+)
 
 app = FastAPI(
     title="yt-dlp Video JSON & Direct Link API",
@@ -17,9 +24,97 @@ app = FastAPI(
     version="2.0.0"
 )
 
-COOKIES_FILE = os.environ.get("COOKIES_FILE", os.path.join(os.path.dirname(__file__), "cookies.txt"))
-PROXY_URL = os.environ.get("PROXY_URL", "socks5://03wwyzpv5xek:nzjfrugmo40zp4d@65.111.10.198:1081")
-PUBLIC_URL = os.environ.get("PUBLIC_URL") or os.environ.get("RAILWAY_STATIC_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+# ==========================================
+# MONGODB CLIENT SETUP & CACHE HELPERS
+# ==========================================
+mongo_client = None
+mongo_coll = None
+
+try:
+    mongo_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=4000)
+    mongo_db = mongo_client[MONGO_DB_NAME]
+    mongo_coll = mongo_db[MONGO_COLLECTION_NAME]
+    # Create indexes for fast lookup and TTL expiration
+    mongo_coll.create_index("url_key", unique=True)
+    mongo_coll.create_index("created_at")
+except Exception as e:
+    print(f"MongoDB connection warning (cache will run in memory/bypass): {e}")
+    mongo_coll = None
+
+def get_cached_metadata(url_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Checks if format metadata is already cached in MongoDB and not expired.
+    """
+    if mongo_coll is None:
+        return None
+    try:
+        doc = mongo_coll.find_one({"url_key": url_key})
+        if doc:
+            created_at = doc.get("created_at", 0)
+            if time.time() - created_at < CACHE_EXPIRY_SECONDS:
+                cached_data = doc.get("data")
+                if cached_data:
+                    return cached_data
+    except Exception as e:
+        print(f"MongoDB cache read error: {e}")
+    return None
+
+def save_cached_metadata(url_key: str, data: Dict[str, Any]):
+    """
+    Saves extracted metadata to MongoDB with current timestamp.
+    """
+    if mongo_coll is None:
+        return
+    try:
+        mongo_coll.update_one(
+            {"url_key": url_key},
+            {"$set": {"url_key": url_key, "data": data, "created_at": time.time()}},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"MongoDB cache write error: {e}")
+
+# ==========================================
+# ROTATING PROXIES & COOKIES POOL
+# ==========================================
+class FailoverManager:
+    def __init__(self):
+        self.proxy_index = 0
+        self.cookie_index = 0
+        self.proxies = load_proxy_pool()
+        self.cookies = load_cookie_pool()
+
+    def refresh(self):
+        self.proxies = load_proxy_pool()
+        self.cookies = load_cookie_pool()
+
+    def get_current_proxy(self) -> Optional[str]:
+        if not self.proxies:
+            return None
+        return self.proxies[self.proxy_index % len(self.proxies)]
+
+    def rotate_proxy(self) -> Optional[str]:
+        if not self.proxies:
+            return None
+        self.proxy_index += 1
+        chosen = self.proxies[self.proxy_index % len(self.proxies)]
+        print(f"[FAILOVER] Switched to proxy: {chosen}")
+        return chosen
+
+    def get_current_cookie(self) -> Optional[str]:
+        if not self.cookies:
+            return None
+        return self.cookies[self.cookie_index % len(self.cookies)]
+
+    def rotate_cookie(self) -> Optional[str]:
+        if not self.cookies:
+            return None
+        self.cookie_index += 1
+        chosen = self.cookies[self.cookie_index % len(self.cookies)]
+        print(f"[FAILOVER] Switched to cookie file: {chosen}")
+        return chosen
+
+failover = FailoverManager()
 
 def get_effective_base_url(request: Optional[Request] = None) -> str:
     if PUBLIC_URL:
@@ -54,7 +149,7 @@ def format_duration(seconds: Optional[int]) -> Optional[str]:
         return f"{hours:02d}:{mins:02d}:{secs:02d}"
     return f"{mins:02d}:{secs:02d}"
 
-def get_ydl_opts(proxy: Optional[str] = PROXY_URL, use_cookies: bool = True):
+def get_ydl_opts(proxy: Optional[str] = None, cookiefile: Optional[str] = None, use_cookies: bool = True):
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -72,8 +167,8 @@ def get_ydl_opts(proxy: Optional[str] = PROXY_URL, use_cookies: bool = True):
     if proxy:
         opts["proxy"] = proxy
 
-    if use_cookies and os.path.exists(COOKIES_FILE):
-        opts["cookiefile"] = COOKIES_FILE
+    if use_cookies and cookiefile and os.path.exists(cookiefile):
+        opts["cookiefile"] = cookiefile
 
     return opts
 
@@ -129,7 +224,8 @@ def get_or_create_merged_video(url: str, quality: str, disable_proxy: bool = Fal
     Downloads and merges video + audio into a single MP4 with sound using yt-dlp + FFmpeg.
     Caches the file locally so repeated clicks on stream_url or download_url are instant.
     """
-    selected_proxy = None if disable_proxy else PROXY_URL
+    selected_proxy = None if disable_proxy else failover.get_current_proxy()
+    selected_cookie = failover.get_current_cookie()
     temp_dir = os.path.join(tempfile.gettempdir(), "ytdlp_downloads")
     os.makedirs(temp_dir, exist_ok=True)
 
@@ -144,7 +240,7 @@ def get_or_create_merged_video(url: str, quality: str, disable_proxy: bool = Fal
     h = height_map.get(quality.lower().strip(), "720")
 
     # Check cache by extracting basic info
-    opts_meta = get_ydl_opts(proxy=selected_proxy)
+    opts_meta = get_ydl_opts(proxy=selected_proxy, cookiefile=selected_cookie)
     with yt_dlp.YoutubeDL(opts_meta) as ydl:
         info = ydl.extract_info(url, download=False)
         video_id = info.get("id") or "video"
@@ -162,7 +258,7 @@ def get_or_create_merged_video(url: str, quality: str, disable_proxy: bool = Fal
     )
     out_template = os.path.join(temp_dir, f"{video_id}_{h}p.%(ext)s")
 
-    opts = get_ydl_opts(proxy=selected_proxy)
+    opts = get_ydl_opts(proxy=selected_proxy, cookiefile=selected_cookie)
     opts.update({
         "format": format_spec,
         "outtmpl": out_template,
@@ -194,11 +290,12 @@ def get_or_create_audio(url: str, format_id: str, disable_proxy: bool = False) -
     """
     Downloads and extracts an audio track reliably with MP3 transcoding so it never times out or drops.
     """
-    selected_proxy = None if disable_proxy else PROXY_URL
+    selected_proxy = None if disable_proxy else failover.get_current_proxy()
+    selected_cookie = failover.get_current_cookie()
     temp_dir = os.path.join(tempfile.gettempdir(), "ytdlp_downloads")
     os.makedirs(temp_dir, exist_ok=True)
 
-    opts_meta = get_ydl_opts(proxy=selected_proxy)
+    opts_meta = get_ydl_opts(proxy=selected_proxy, cookiefile=selected_cookie)
     with yt_dlp.YoutubeDL(opts_meta) as ydl:
         info = ydl.extract_info(url, download=False)
         video_id = info.get("id") or "video"
@@ -208,7 +305,7 @@ def get_or_create_audio(url: str, format_id: str, disable_proxy: bool = False) -
         return cached_target
 
     out_template = os.path.join(temp_dir, f"{video_id}_audio_{format_id}.%(ext)s")
-    opts = get_ydl_opts(proxy=selected_proxy)
+    opts = get_ydl_opts(proxy=selected_proxy, cookiefile=selected_cookie)
     opts.update({
         "format": format_id,
         "outtmpl": out_template,
@@ -234,201 +331,239 @@ def get_or_create_audio(url: str, format_id: str, disable_proxy: bool = False) -
 
 
 def extract_all_infodata(url: str, disable_proxy: bool = False, base_url: str = "http://127.0.0.1:8000"):
-    selected_proxy = None if disable_proxy else PROXY_URL
-    ydl_opts = get_ydl_opts(proxy=selected_proxy)
+    encoded_video_url = urllib.parse.quote(url, safe='')
+    cache_key = f"{url}_base_{base_url}"
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        if not info:
-            raise HTTPException(status_code=404, detail="No info could be retrieved for this URL.")
+    # 1. CHECK MONGODB CACHE (Instant response & prevents rate limits)
+    cached = get_cached_metadata(cache_key)
+    if cached:
+        return cached
 
-        raw_formats = info.get("formats", [])
-        audio_formats = []
-        video_formats = []
-        combined_formats = []
-        all_formats = []
-        encoded_video_url = urllib.parse.quote(url, safe='')
+    # 2. FAILOVER RETRY LOOP ACROSS ROTATING PROXIES AND COOKIES
+    failover.refresh()
+    proxies_to_try = [None] if disable_proxy else (failover.proxies if failover.proxies else [None])
+    cookies_to_try = failover.cookies if failover.cookies else [None]
 
-        for f in raw_formats:
-            vcodec = f.get("vcodec")
-            acodec = f.get("acodec")
-            filesize = f.get("filesize") or f.get("filesize_approx")
-            raw_url = f.get("url")
-            height = f.get("height")
-            fps = f.get("fps")
+    last_error = None
+    info = None
 
-            format_entry = {
-                "format_id": f.get("format_id"),
-                "format_note": f.get("format_note"),
-                "quality_label": get_clean_quality_label(height, fps, f.get("format_note")),
-                "ext": f.get("ext"),
-                "resolution": f.get("resolution"),
-                "width": f.get("width"),
-                "height": height,
-                "fps": fps,
-                "dynamic_range": f.get("dynamic_range"),
-                "vcodec": vcodec,
-                "acodec": acodec,
-                "abr": f.get("abr"),
-                "vbr": f.get("vbr"),
-                "tbr": f.get("tbr"),
-                "asr": f.get("asr"),
-                "audio_channels": f.get("audio_channels"),
-                "filesize": filesize,
-                "filesize_formatted": format_bytes(filesize),
-                "container": f.get("container"),
-                "protocol": f.get("protocol"),
-                "url": raw_url,
-                "stream_url": make_stream_url(raw_url, base_url),
-                "http_headers": f.get("http_headers"),
-            }
+    for attempt in range(max(len(proxies_to_try) * len(cookies_to_try), 1)):
+        active_proxy = None if disable_proxy else failover.get_current_proxy()
+        active_cookie = failover.get_current_cookie()
+        ydl_opts = get_ydl_opts(proxy=active_proxy, cookiefile=active_cookie)
 
-            all_formats.append(format_entry)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info and info.get("formats"):
+                    break
+        except Exception as e:
+            err_msg = str(e)
+            print(f"[FAILOVER] Error on proxy {active_proxy}, cookie {active_cookie}: {err_msg}")
+            last_error = err_msg
+            # Rotate cookie on bot check / sign in / rate limit
+            if "Sign in" in err_msg or "bot" in err_msg.lower() or "rate-limit" in err_msg.lower() or "429" in err_msg:
+                failover.rotate_cookie()
+            # Rotate proxy on network/connect/timeout/403 errors
+            failover.rotate_proxy()
 
-            is_video = vcodec not in (None, "none")
-            is_audio = acodec not in (None, "none")
-
-            if is_video and is_audio:
-                combined_formats.append(format_entry)
-            elif is_video and not is_audio:
-                video_formats.append(format_entry)
-            elif is_audio and not is_video:
-                audio_entry = dict(format_entry)
-                # Stable audio stream that doesn't drop or time out
-                audio_entry["stream_url"] = f"{base_url}/api/stream_audio?url={encoded_video_url}&format_id={f.get('format_id')}"
-                audio_entry["raw_proxy_url"] = format_entry["stream_url"]
-                audio_formats.append(audio_entry)
-
-        # 1. SORT AUDIO FORMATS (Highest audio bitrate/quality first)
-        audio_formats.sort(
-            key=lambda a: (a.get("abr") or 0, a.get("tbr") or 0, a.get("filesize") or 0),
-            reverse=True
+    if not info:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unable to extract video information after proxy/cookie failover. Error: {last_error}"
         )
 
-        # 2. SORT VIDEO FORMATS UP TO 8K (Highest resolution 8K -> 4K -> 2K -> 1080p -> ... -> 144p)
-        video_formats.sort(
-            key=lambda v: (
-                v.get("height") or 0,
-                v.get("width") or 0,
-                v.get("fps") or 0,
-                v.get("tbr") or v.get("vbr") or 0
-            ),
-            reverse=True
-        )
+    raw_formats = info.get("formats", [])
+    audio_formats = []
+    video_formats = []
+    combined_formats = []
+    all_formats = []
+    encoded_video_url = urllib.parse.quote(url, safe='')
 
-        # 3. SORT COMBINED LEGACY FORMATS (Highest resolution first)
-        combined_formats.sort(
-            key=lambda c: (c.get("height") or 0, c.get("tbr") or 0),
-            reverse=True
-        )
+    for f in raw_formats:
+        vcodec = f.get("vcodec")
+        acodec = f.get("acodec")
+        filesize = f.get("filesize") or f.get("filesize_approx")
+        raw_url = f.get("url")
+        height = f.get("height")
+        fps = f.get("fps")
 
-        paired_streams = []
-        title_sanitized = "".join(c for c in (info.get("title") or "video") if c.isalnum() or c in (' ', '_', '-')).rstrip()
-        encoded_video_url = urllib.parse.quote(url, safe='')
-
-        for v in video_formats:
-            v_ext = v.get("ext") or "mp4"
-            matching_audio = find_best_audio(audio_formats, target_ext=v_ext)
-
-            v_size = v.get("filesize") or 0
-            a_size = (matching_audio.get("filesize") or 0) if matching_audio else 0
-            total_size = (v_size + a_size) if (v_size and a_size) else (v_size or a_size or None)
-
-            h = v.get("height") or 720
-            clean_label = v.get("quality_label")
-            filename = f"{title_sanitized}_{h}p.{v_ext}"
-
-            v_url = v.get("url")
-            a_url = matching_audio.get("url") if matching_audio else None
-
-            ffmpeg_cmd = (
-                f'ffmpeg -i "{v_url}" -i "{a_url}" -c copy -y "{filename}"'
-                if v_url and a_url else None
-            )
-
-            # Combined streaming endpoint (plays inline with sound!)
-            stream_with_sound_url = f"{base_url}/api/stream_video?url={encoded_video_url}&quality={h}p"
-            # Combined download endpoint (saves file with sound!)
-            download_with_sound_url = f"{base_url}/api/download?url={encoded_video_url}&quality={h}p"
-
-            paired_streams.append({
-                "quality_label": clean_label,
-                "resolution": v.get("resolution"),
-                "width": v.get("width"),
-                "height": v.get("height"),
-                "fps": v.get("fps"),
-                "container": "mp4",
-                "dynamic_range": v.get("dynamic_range"),
-                "estimated_total_filesize": total_size,
-                "estimated_total_filesize_formatted": format_bytes(total_size),
-                # STREAM DIRECTLY IN BROWSER WITH SOUND (COMBINED VIDEO + AUDIO):
-                "stream_url": stream_with_sound_url,
-                "stream_with_sound_url": stream_with_sound_url,
-                "download_with_sound_url": download_with_sound_url,
-                "video": {
-                    "format_id": v.get("format_id"),
-                    "vcodec": v.get("vcodec"),
-                    "vbr": v.get("vbr"),
-                    "filesize": v_size,
-                    "filesize_formatted": format_bytes(v_size),
-                    "url": v_url,
-                    "stream_url_video_only": make_stream_url(v_url, base_url),
-                },
-                "audio": {
-                    "format_id": matching_audio.get("format_id") if matching_audio else None,
-                    "acodec": matching_audio.get("acodec") if matching_audio else None,
-                    "abr": matching_audio.get("abr") if matching_audio else None,
-                    "filesize": a_size if matching_audio else None,
-                    "filesize_formatted": format_bytes(a_size) if matching_audio else None,
-                    "url": a_url,
-                    "stream_url_audio_only": make_stream_url(a_url, base_url),
-                } if matching_audio else None,
-                "ffmpeg_command": ffmpeg_cmd
-            })
-
-        return {
-            "success": True,
-            "metadata": {
-                "id": info.get("id"),
-                "title": info.get("title"),
-                "description": info.get("description"),
-                "duration": info.get("duration"),
-                "duration_formatted": format_duration(info.get("duration")),
-                "uploader": info.get("uploader"),
-                "uploader_id": info.get("uploader_id"),
-                "uploader_url": info.get("uploader_url"),
-                "channel": info.get("channel"),
-                "channel_id": info.get("channel_id"),
-                "channel_url": info.get("channel_url"),
-                "upload_date": info.get("upload_date"),
-                "view_count": info.get("view_count"),
-                "like_count": info.get("like_count"),
-                "comment_count": info.get("comment_count"),
-                "thumbnail": info.get("thumbnail"),
-                "thumbnails": info.get("thumbnails", []),
-                "webpage_url": info.get("webpage_url"),
-                "tags": info.get("tags", []),
-                "categories": info.get("categories", []),
-            },
-            "summary": {
-                "total_audio_formats": len(audio_formats),
-                "total_video_formats_upto_8k": len(video_formats),
-                "total_paired_video_audio": len(paired_streams),
-                "total_combined_legacy": len(combined_formats),
-                "max_resolution_available": video_formats[0].get("quality_label") if video_formats else None,
-                "best_audio_bitrate": f"{audio_formats[0].get('abr')} kbps" if audio_formats and audio_formats[0].get('abr') else None,
-            },
-            # 1. AUDIO FIRST (Arranged from highest quality/bitrate to lowest)
-            "audio_formats": audio_formats,
-            # 2. VIDEO FORMATS UP TO 8K (Arranged from 8K / 4K / 2K / 1080p down to 144p)
-            "video_formats_upto_8k": video_formats,
-            # 3. PAIRED VIDEO + AUDIO (With sound combined in stream_url!)
-            "paired_video_audio": paired_streams,
-            # 4. COMBINED PROGRESSIVE (Legacy single-file formats with audio)
-            "combined_formats": combined_formats,
-            # 5. ALL RAW FORMAT ENTRIES
-            "all_formats": all_formats
+        format_entry = {
+            "format_id": f.get("format_id"),
+            "format_note": f.get("format_note"),
+            "quality_label": get_clean_quality_label(height, fps, f.get("format_note")),
+            "ext": f.get("ext"),
+            "resolution": f.get("resolution"),
+            "width": f.get("width"),
+            "height": height,
+            "fps": fps,
+            "dynamic_range": f.get("dynamic_range"),
+            "vcodec": vcodec,
+            "acodec": acodec,
+            "abr": f.get("abr"),
+            "vbr": f.get("vbr"),
+            "tbr": f.get("tbr"),
+            "asr": f.get("asr"),
+            "audio_channels": f.get("audio_channels"),
+            "filesize": filesize,
+            "filesize_formatted": format_bytes(filesize),
+            "container": f.get("container"),
+            "protocol": f.get("protocol"),
+            "url": raw_url,
+            "stream_url": make_stream_url(raw_url, base_url),
+            "http_headers": f.get("http_headers"),
         }
+
+        all_formats.append(format_entry)
+
+        is_video = vcodec not in (None, "none")
+        is_audio = acodec not in (None, "none")
+
+        if is_video and is_audio:
+            combined_formats.append(format_entry)
+        elif is_video and not is_audio:
+            video_formats.append(format_entry)
+        elif is_audio and not is_video:
+            audio_entry = dict(format_entry)
+            # Stable audio stream that doesn't drop or time out
+            audio_entry["stream_url"] = f"{base_url}/api/stream_audio?url={encoded_video_url}&format_id={f.get('format_id')}"
+            audio_entry["raw_proxy_url"] = format_entry["stream_url"]
+            audio_formats.append(audio_entry)
+
+    # 1. SORT AUDIO FORMATS (Highest audio bitrate/quality first)
+    audio_formats.sort(
+        key=lambda a: (a.get("abr") or 0, a.get("tbr") or 0, a.get("filesize") or 0),
+        reverse=True
+    )
+
+    # 2. SORT VIDEO FORMATS UP TO 8K (Highest resolution 8K -> 4K -> 2K -> 1080p -> ... -> 144p)
+    video_formats.sort(
+        key=lambda v: (
+            v.get("height") or 0,
+            v.get("width") or 0,
+            v.get("fps") or 0,
+            v.get("tbr") or v.get("vbr") or 0
+        ),
+        reverse=True
+    )
+
+    # 3. SORT COMBINED LEGACY FORMATS (Highest resolution first)
+    combined_formats.sort(
+        key=lambda c: (c.get("height") or 0, c.get("tbr") or 0),
+        reverse=True
+    )
+
+    paired_streams = []
+    title_sanitized = "".join(c for c in (info.get("title") or "video") if c.isalnum() or c in (' ', '_', '-')).rstrip()
+    encoded_video_url = urllib.parse.quote(url, safe='')
+
+    for v in video_formats:
+        v_ext = v.get("ext") or "mp4"
+        matching_audio = find_best_audio(audio_formats, target_ext=v_ext)
+
+        v_size = v.get("filesize") or 0
+        a_size = (matching_audio.get("filesize") or 0) if matching_audio else 0
+        total_size = (v_size + a_size) if (v_size and a_size) else (v_size or a_size or None)
+
+        h = v.get("height") or 720
+        clean_label = v.get("quality_label")
+        filename = f"{title_sanitized}_{h}p.{v_ext}"
+
+        v_url = v.get("url")
+        a_url = matching_audio.get("url") if matching_audio else None
+
+        ffmpeg_cmd = (
+            f'ffmpeg -i "{v_url}" -i "{a_url}" -c copy -y "{filename}"'
+            if v_url and a_url else None
+        )
+
+        # Combined streaming endpoint (plays inline with sound!)
+        stream_with_sound_url = f"{base_url}/api/stream_video?url={encoded_video_url}&quality={h}p"
+        # Combined download endpoint (saves file with sound!)
+        download_with_sound_url = f"{base_url}/api/download?url={encoded_video_url}&quality={h}p"
+
+        paired_streams.append({
+            "quality_label": clean_label,
+            "resolution": v.get("resolution"),
+            "width": v.get("width"),
+            "height": v.get("height"),
+            "fps": v.get("fps"),
+            "container": "mp4",
+            "dynamic_range": v.get("dynamic_range"),
+            "estimated_total_filesize": total_size,
+            "estimated_total_filesize_formatted": format_bytes(total_size),
+            # STREAM DIRECTLY IN BROWSER WITH SOUND (COMBINED VIDEO + AUDIO):
+            "stream_url": stream_with_sound_url,
+            "stream_with_sound_url": stream_with_sound_url,
+            "download_with_sound_url": download_with_sound_url,
+            "video": {
+                "format_id": v.get("format_id"),
+                "vcodec": v.get("vcodec"),
+                "vbr": v.get("vbr"),
+                "filesize": v_size,
+                "filesize_formatted": format_bytes(v_size),
+                "url": v_url,
+                "stream_url_video_only": make_stream_url(v_url, base_url),
+            },
+            "audio": {
+                "format_id": matching_audio.get("format_id") if matching_audio else None,
+                "acodec": matching_audio.get("acodec") if matching_audio else None,
+                "abr": matching_audio.get("abr") if matching_audio else None,
+                "filesize": a_size if matching_audio else None,
+                "filesize_formatted": format_bytes(a_size) if matching_audio else None,
+                "url": a_url,
+                "stream_url_audio_only": make_stream_url(a_url, base_url),
+            } if matching_audio else None,
+            "ffmpeg_command": ffmpeg_cmd
+        })
+
+    result_data = {
+        "success": True,
+        "metadata": {
+            "id": info.get("id"),
+            "title": info.get("title"),
+            "description": info.get("description"),
+            "duration": info.get("duration"),
+            "duration_formatted": format_duration(info.get("duration")),
+            "uploader": info.get("uploader"),
+            "uploader_id": info.get("uploader_id"),
+            "uploader_url": info.get("uploader_url"),
+            "channel": info.get("channel"),
+            "channel_id": info.get("channel_id"),
+            "channel_url": info.get("channel_url"),
+            "upload_date": info.get("upload_date"),
+            "view_count": info.get("view_count"),
+            "like_count": info.get("like_count"),
+            "comment_count": info.get("comment_count"),
+            "thumbnail": info.get("thumbnail"),
+            "thumbnails": info.get("thumbnails", []),
+            "webpage_url": info.get("webpage_url"),
+            "tags": info.get("tags", []),
+            "categories": info.get("categories", []),
+        },
+        "summary": {
+            "total_audio_formats": len(audio_formats),
+            "total_video_formats_upto_8k": len(video_formats),
+            "total_paired_video_audio": len(paired_streams),
+            "total_combined_legacy": len(combined_formats),
+            "max_resolution_available": video_formats[0].get("quality_label") if video_formats else None,
+            "best_audio_bitrate": f"{audio_formats[0].get('abr')} kbps" if audio_formats and audio_formats[0].get('abr') else None,
+        },
+        # 1. AUDIO FIRST (Arranged from highest quality/bitrate to lowest)
+        "audio_formats": audio_formats,
+        # 2. VIDEO FORMATS UP TO 8K (Arranged from 8K / 4K / 2K / 1080p down to 144p)
+        "video_formats_upto_8k": video_formats,
+        # 3. PAIRED VIDEO + AUDIO (With sound combined in stream_url!)
+        "paired_video_audio": paired_streams,
+        # 4. COMBINED PROGRESSIVE (Legacy single-file formats with audio)
+        "combined_formats": combined_formats,
+        # 5. ALL RAW FORMAT ENTRIES
+        "all_formats": all_formats
+    }
+
+    # Save to MongoDB before links expire
+    save_cached_metadata(cache_key, result_data)
+    return result_data
 
 @app.get("/")
 @app.get("/index.html")
@@ -445,6 +580,14 @@ def api_status(request: Request):
         "status": "online",
         "service": "yt-dlp Video & Audio Streaming API (Railway / Koyeb / Render)",
         "server_base_url": base_url,
+        "diagnostics": {
+            "mongodb_connected": mongo_coll is not None,
+            "mongodb_database": MONGO_DB_NAME,
+            "proxies_loaded": len(failover.proxies),
+            "cookies_loaded": [os.path.basename(c) for c in failover.cookies],
+            "active_proxy": failover.get_current_proxy(),
+            "active_cookie": os.path.basename(failover.get_current_cookie()) if failover.get_current_cookie() else None
+        },
         "endpoints": {
             "web_ui": f"{base_url}/",
             "streams_only_audio_and_video": f"{base_url}/api/streams?url=<YOUTUBE_URL>",
@@ -478,8 +621,9 @@ def search_youtube(
             "Content-Type": "application/json"
         }
         
-        # Use direct connection or proxy
-        proxies = None if disable_proxy else {"http": PROXY_URL, "https": PROXY_URL}
+        # Use direct connection or active rotating proxy
+        active_p = None if disable_proxy else failover.get_current_proxy()
+        proxies = {"http": active_p, "https": active_p} if active_p else None
         resp = requests.post(
             "https://www.youtube.com/youtubei/v1/search?prettyPrint=false",
             data=data,
@@ -520,8 +664,9 @@ def search_youtube(
         pass
 
     # 2. Fallback to yt-dlp flat extraction
-    selected_proxy = None if disable_proxy else PROXY_URL
-    opts = get_ydl_opts(proxy=selected_proxy)
+    selected_proxy = None if disable_proxy else failover.get_current_proxy()
+    selected_cookie = failover.get_current_cookie()
+    opts = get_ydl_opts(proxy=selected_proxy, cookiefile=selected_cookie)
     opts.update({
         "extract_flat": True,
         "skip_download": True,
@@ -632,10 +777,11 @@ def proxy_raw_stream(
         if range_header:
             headers["Range"] = range_header
 
+    active_proxy = failover.get_current_proxy()
     proxies = {
-        "http": PROXY_URL,
-        "https": PROXY_URL,
-    }
+        "http": active_proxy,
+        "https": active_proxy,
+    } if active_proxy else None
 
     try:
         req = requests.get(url, headers=headers, proxies=proxies, stream=True, timeout=30)

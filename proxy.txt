@@ -1,0 +1,7 @@
+# Add your proxy list here (one per line)
+# Supported formats:
+# socks5://user:pass@host:port
+# http://user:pass@host:port
+# host:port
+# host:port:user:pass
+socks5://03wwyzpv5xek:nzjfrugmo40zp4d@65.111.10.198:1081
