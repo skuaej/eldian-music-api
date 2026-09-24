@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Search, Media Player & JSON Hub</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --card-border: #30363d;
+      --primary: #ff0033;
+      --primary-hover: #cc0029;
+      --accent: #238636;
+      --accent-hover: #2ea043;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --blue: #58a6ff;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 980px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+
+    .logo {
+      font-size: 28px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+    }
+
+    .logo span {
+      background: var(--primary);
+      padding: 4px 10px;
+      border-radius: 6px;
+      color: #fff;
+    }
+
+    .subtitle {
+      color: var(--text-muted);
+      margin-top: 8px;
+      font-size: 14px;
+    }
+
+    .search-box {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    input[type="text"] {
+      flex: 1;
+      padding: 14px 16px;
+      background: #0d1117;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      color: #fff;
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input[type="text"]:focus {
+      border-color: var(--blue);
+    }
+
+    button.btn-fetch {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 0 24px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 15px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+
+    button.btn-fetch:hover {
+      background: var(--primary-hover);
+    }
+
+    .options-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .options-row label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+
+    #loading {
+      display: none;
+      text-align: center;
+      margin: 32px 0;
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 4px solid rgba(255, 255, 255, 0.1);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 12px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    #error-msg {
+      display: none;
+      background: rgba(248, 81, 73, 0.15);
+      border: 1px solid #f85149;
+      color: #ff7b72;
+      padding: 14px 16px;
+      border-radius: 8px;
+      margin-top: 20px;
+      font-size: 14px;
+    }
+
+    /* SEARCH RESULTS GRID */
+    #search-results-section {
+      display: none;
+      margin-top: 24px;
+    }
+
+    .search-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 16px;
+      margin-top: 14px;
+    }
+
+    .search-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      cursor: pointer;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+
+    .search-card:hover {
+      transform: translateY(-3px);
+      border-color: var(--blue);
+    }
+
+    .search-card-thumb {
+      position: relative;
+      width: 100%;
+      padding-top: 56.25%;
+      background: #000;
+    }
+
+    .search-card-thumb img {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .search-card-body {
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      flex: 1;
+    }
+
+    .search-card-title {
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.35;
+      color: var(--text);
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .search-card-channel {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* Video Details Section */
+    #result {
+      display: none;
+      margin-top: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .video-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .video-header {
+      display: flex;
+      gap: 20px;
+    }
+
+    .thumb-wrap {
+      position: relative;
+      width: 220px;
+      min-width: 220px;
+      height: 124px;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+    }
+
+    .thumb-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .duration-badge {
+      position: absolute;
+      bottom: 6px;
+      right: 6px;
+      background: rgba(0,0,0,0.85);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    .video-info {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .video-title {
+      font-size: 18px;
+      font-weight: 600;
+      line-height: 1.35;
+      color: var(--text);
+    }
+
+    .video-meta {
+      font-size: 13px;
+      color: var(--text-muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+    }
+
+    /* Embedded Video Player */
+    .player-container {
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      display: none;
+      margin-top: 8px;
+      border: 1px solid var(--card-border);
+    }
+
+    .player-header {
+      background: #1f242c;
+      padding: 8px 14px;
+      font-size: 13px;
+      color: var(--text);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    video {
+      width: 100%;
+      max-height: 480px;
+      display: block;
+      background: #000;
+    }
+
+    /* Tabs Styling */
+    .tabs-nav {
+      display: flex;
+      gap: 8px;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 4px;
+      margin-bottom: 16px;
+    }
+
+    .tab-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 14px;
+      font-weight: 600;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+
+    .tab-btn:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .tab-btn.active {
+      color: #fff;
+      background: #21262d;
+      border-bottom: 2px solid var(--primary);
+    }
+
+    .tab-pane {
+      display: none;
+    }
+
+    .tab-pane.active {
+      display: block;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .badge-count {
+      background: #21262d;
+      color: var(--blue);
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      border: 1px solid #30363d;
+    }
+
+    .format-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .format-table th {
+      text-align: left;
+      padding: 10px 12px;
+      background: #1f242c;
+      color: var(--text-muted);
+      font-weight: 600;
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    .format-table td {
+      padding: 12px;
+      border-bottom: 1px solid #21262d;
+      vertical-align: middle;
+    }
+
+    .format-table tr:hover {
+      background: #1c2128;
+    }
+
+    .quality-tag {
+      font-weight: 600;
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .tag-8k, .tag-4k { color: #f2cc60; }
+    .tag-fhd { color: #58a6ff; }
+    .tag-hd { color: #3fb950; }
+
+    .btn-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      border: none;
+      transition: opacity 0.2s;
+    }
+
+    .btn-action:hover {
+      opacity: 0.85;
+    }
+
+    .btn-play {
+      background: var(--blue);
+      color: #0d1117;
+    }
+
+    .btn-download {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn-zero-load {
+      background: #8957e5;
+      color: #fff;
+    }
+
+    .actions-cell {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      align-items: center;
+    }
+
+    /* JSON Viewer */
+    .json-header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .btn-json-action {
+      background: #21262d;
+      border: 1px solid var(--card-border);
+      color: var(--text);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+
+    .btn-json-action:hover {
+      background: #30363d;
+      color: #fff;
+    }
+
+    pre.json-display {
+      background: #0a0d12;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 16px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #c9d1d9;
+      max-height: 540px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .compat-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(63, 185, 80, 0.15);
+      color: #3fb950;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .zero-load-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(137, 87, 229, 0.15);
+      color: #d2a8ff;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    @media (max-width: 700px) {
+      .video-header {
+        flex-direction: column;
+      }
+      .thumb-wrap {
+        width: 100%;
+        height: 180px;
+      }
+      .actions-cell {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="logo">
+        <span>YT</span> Media Player & Search Hub
+      </div>
+      <p class="subtitle">Search any keyword, stream with sound, and download with zero VPS load</p>
+    </header>
+
+    <div class="search-box">
+      <div class="input-row">
+        <input 
+          type="text" 
+          id="video-url" 
+          placeholder="Type keywords (e.g. AD KLAYI, Sanam Re) or paste YouTube link..."
+          value="AD KLAYI"
+          autofocus
+        />
+        <button class="btn-fetch" id="btn-fetch" onclick="handleSearchOrFetch()">
+          <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+          </svg>
+          Search / Play
+        </button>
+      </div>
+      <div class="options-row">
+        <label>
+          <input type="checkbox" id="disable-proxy"> Bypass SOCKS5 proxy (Use direct internet)
+        </label>
+        <span class="zero-load-badge">⚡ Zero VPS Disk Load Mode</span>
+      </div>
+    </div>
+
+    <div id="loading">
+      <div class="spinner"></div>
+      <p id="loading-text" style="color: var(--text-muted); font-size: 14px;">Searching YouTube...</p>
+    </div>
+
+    <div id="error-msg"></div>
+
+    <!-- KEYWORD SEARCH RESULTS GRID -->
+    <div id="search-results-section" class="video-card">
+      <div class="section-title">
+        <span>🔍 Search Results</span>
+        <span class="badge-count" id="search-count">0 videos</span>
+      </div>
+      <div class="search-grid" id="search-grid"></div>
+    </div>
+
+    <!-- VIDEO PLAYER & DETAILS SECTION -->
+    <div id="result">
+      <!-- Video Details Header -->
+      <div class="video-card">
+        <div class="video-header">
+          <div class="thumb-wrap">
+            <img id="meta-thumb" src="" alt="Thumbnail" />
+            <div class="duration-badge" id="meta-duration">00:00</div>
+          </div>
+          <div class="video-info">
+            <h2 class="video-title" id="meta-title"></h2>
+            <div class="video-meta">
+              <span id="meta-channel" style="color: #fff; font-weight: 500;"></span>
+              <span id="meta-views"></span>
+              <span id="meta-upload"></span>
+            </div>
+            <div style="margin-top: 4px; display: flex; gap: 8px;">
+              <span class="compat-badge">✓ PC & Mobile Playable (H.264 + AAC Sound)</span>
+              <span class="zero-load-badge">✓ Zero VPS Load</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Embedded Video Player -->
+        <div class="player-container" id="player-container">
+          <div class="player-header">
+            <span id="player-status">⚡ Instant Player (Zero Waiting)</span>
+            <div style="display:flex; gap:8px;">
+              <button class="btn-action" style="background:#238636; color:#fff;" id="btn-toggle-player" onclick="togglePlayerMode()">Switch to Raw Stream</button>
+              <button class="btn-action" style="background:#30363d; color:#fff;" onclick="closePlayer()">✕ Close Player</button>
+            </div>
+          </div>
+          <iframe id="instant-iframe" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%; height:450px; border:none; display:block;"></iframe>
+          <video id="html-player" controls preload="metadata" style="display:none;"></video>
+        </div>
+      </div>
+
+      <!-- MAIN TABS CONTAINER -->
+      <div class="video-card">
+        <div class="tabs-nav">
+          <button class="tab-btn active" onclick="switchTab('tab-video')">
+            🎬 Video Streams
+          </button>
+          <button class="tab-btn" onclick="switchTab('tab-audio')">
+            🎵 Audio Tracks
+          </button>
+          <button class="tab-btn" onclick="switchTab('tab-json')">
+            📋 JSON Data List
+          </button>
+        </div>
+
+        <!-- TAB 1: VIDEO (WITH SOUND COMBINED) -->
+        <div id="tab-video" class="tab-pane active">
+          <div class="section-title">
+            <span>Video Qualities (Combined with Sound & PC Playable)</span>
+            <span class="badge-count" id="video-count">0 qualities</span>
+          </div>
+          <table class="format-table">
+            <thead>
+              <tr>
+                <th>Quality</th>
+                <th>Container</th>
+                <th>Est. Size</th>
+                <th style="text-align: right;">Play & Download (Zero VPS Load)</th>
+              </tr>
+            </thead>
+            <tbody id="video-table-body"></tbody>
+          </table>
+        </div>
+
+        <!-- TAB 2: AUDIO ONLY -->
+        <div id="tab-audio" class="tab-pane">
+          <div class="section-title">
+            <span>Audio Streams (High to Low Bitrate)</span>
+            <span class="badge-count" id="audio-count">0 tracks</span>
+          </div>
+          <table class="format-table">
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Bitrate</th>
+                <th>Size</th>
+                <th style="text-align: right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="audio-table-body"></tbody>
+          </table>
+        </div>
+
+        <!-- TAB 3: JSON LIST & TREE -->
+        <div id="tab-json" class="tab-pane">
+          <div class="json-header-bar">
+            <span style="font-size: 14px; font-weight: 600; color: var(--text-muted);">
+              Full Parsed JSON Response
+            </span>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-json-action" onclick="copyJsonData()">
+                📋 Copy JSON
+              </button>
+              <button class="btn-json-action" onclick="downloadJsonData()">
+                ⬇ Download JSON
+              </button>
+            </div>
+          </div>
+          <pre class="json-display" id="json-viewer">// JSON data will appear here after fetching</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentRawJson = null;
+
+    // Trigger on Enter
+    document.getElementById('video-url').addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        handleSearchOrFetch();
+      }
+    });
+
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-pane').forEach(pane => pane.classList.remove('active'));
+
+      event.currentTarget.classList.add('active');
+      document.getElementById(tabId).classList.add('active');
+    }
+
+    function isYouTubeUrl(str) {
+      return str.includes('youtube.com/') || str.includes('youtu.be/') || str.startsWith('http://') || str.startsWith('https://');
+    }
+
+    async function handleSearchOrFetch() {
+      const input = document.getElementById('video-url').value.trim();
+      if (!input) {
+        alert('Please enter a keyword or paste a YouTube URL.');
+        return;
+      }
+
+      if (isYouTubeUrl(input)) {
+        document.getElementById('search-results-section').style.display = 'none';
+        fetchVideoInfo(input);
+      } else {
+        searchKeywords(input);
+      }
+    }
+
+    async function searchKeywords(query) {
+      const disableProxy = document.getElementById('disable-proxy').checked;
+      const loading = document.getElementById('loading');
+      const loadingText = document.getElementById('loading-text');
+      const errorMsg = document.getElementById('error-msg');
+      const searchSection = document.getElementById('search-results-section');
+      const searchGrid = document.getElementById('search-grid');
+      const result = document.getElementById('result');
+
+      loadingText.innerText = `Searching YouTube for "${query}"...`;
+      loading.style.display = 'block';
+      errorMsg.style.display = 'none';
+      result.style.display = 'none';
+      searchSection.style.display = 'none';
+
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&limit=8&disable_proxy=${disableProxy}`);
+        if (!res.ok) throw new Error('Search failed to return results.');
+        const data = await res.json();
+        const items = data.results || [];
+
+        searchGrid.innerHTML = '';
+        document.getElementById('search-count').innerText = `${items.length} videos found`;
+
+        if (items.length === 0) {
+          throw new Error('No videos found for this search.');
+        }
+
+        items.forEach(video => {
+          const card = document.createElement('div');
+          card.className = 'search-card';
+          card.onclick = () => {
+            document.getElementById('video-url').value = video.url;
+            fetchVideoInfo(video.url);
+          };
+
+          card.innerHTML = `
+            <div class="search-card-thumb">
+              <img src="${video.thumbnail}" alt="" />
+              <div class="duration-badge">${video.duration_formatted || ''}</div>
+            </div>
+            <div class="search-card-body">
+              <div class="search-card-title">${video.title}</div>
+              <div class="search-card-channel">👤 ${video.channel || 'YouTube'}</div>
+              <button class="btn-action btn-play" style="margin-top: 6px; justify-content: center;">
+                ▶ Play & Inspect
+              </button>
+            </div>
+          `;
+          searchGrid.appendChild(card);
+        });
+
+        searchSection.style.display = 'block';
+        searchSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } catch (err) {
+        errorMsg.innerText = 'Error: ' + err.message;
+        errorMsg.style.display = 'block';
+      } finally {
+        loading.style.display = 'none';
+      }
+    }
+
+    async function fetchVideoInfo(targetUrl) {
+      const urlInput = targetUrl || document.getElementById('video-url').value.trim();
+      const disableProxy = document.getElementById('disable-proxy').checked;
+      const loading = document.getElementById('loading');
+      const loadingText = document.getElementById('loading-text');
+      const errorMsg = document.getElementById('error-msg');
+      const result = document.getElementById('result');
+      const playerContainer = document.getElementById('player-container');
+      const player = document.getElementById('html-player');
+
+      loadingText.innerText = 'Extracting video streams & audio tracks...';
+      loading.style.display = 'block';
+      errorMsg.style.display = 'none';
+      result.style.display = 'none';
+      playerContainer.style.display = 'none';
+      player.pause();
+
+      try {
+        const apiUrl = `/infodata?url=${encodeURIComponent(urlInput)}&disable_proxy=${disableProxy}`;
+        const res = await fetch(apiUrl);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(errData.detail || 'Failed to extract video info.');
+        }
+
+        const data = await res.json();
+        currentRawJson = data;
+        renderData(data);
+      } catch (err) {
+        errorMsg.innerText = 'Error: ' + err.message;
+        errorMsg.style.display = 'block';
+      } finally {
+        loading.style.display = 'none';
+      }
+    }
+
+    function renderData(data) {
+      const meta = data.metadata;
+      document.getElementById('meta-title').innerText = meta.title || 'YouTube Video';
+      document.getElementById('meta-thumb').src = meta.thumbnail || '';
+      document.getElementById('meta-duration').innerText = meta.duration_formatted || '';
+      document.getElementById('meta-channel').innerText = '👤 ' + (meta.channel || meta.uploader || 'Unknown Channel');
+      document.getElementById('meta-views').innerText = '👁️ ' + (meta.view_count ? meta.view_count.toLocaleString() + ' views' : '');
+      document.getElementById('meta-upload').innerText = '📅 ' + (meta.upload_date ? formatDate(meta.upload_date) : '');
+
+      // Render JSON Viewer Tab
+      document.getElementById('json-viewer').innerText = JSON.stringify(data, null, 2);
+
+      // Populate Video Table (Paired Video+Audio with Sound)
+      const vBody = document.getElementById('video-table-body');
+      vBody.innerHTML = '';
+      const paired = data.paired_video_audio || [];
+      document.getElementById('video-count').innerText = `${paired.length} qualities`;
+
+      // Check if 360p progressive exists (native 0% VPS load)
+      const combined = data.combined_formats || [];
+      const progressive360 = combined.find(c => c.height === 360 || c.format_id === '18');
+
+      paired.forEach(item => {
+        const tr = document.createElement('tr');
+        const qLabel = item.quality_label || `${item.height}p`;
+        let tagClass = 'tag-hd';
+        if (qLabel.includes('8K') || qLabel.includes('4K')) tagClass = 'tag-8k';
+        else if (qLabel.includes('1080p')) tagClass = 'tag-fhd';
+
+        const is360 = item.height === 360;
+        const zeroLoadBtn = (is360 && progressive360) ? `
+          <a class="btn-action btn-zero-load" href="${progressive360.stream_url}" target="_blank" title="Downloads directly from Google CDN (0% VPS load)">
+            ⚡ 0% VPS Load
+          </a>
+        ` : '';
+
+        tr.innerHTML = `
+          <td>
+            <span class="quality-tag ${tagClass}">
+              ● ${qLabel}
+            </span>
+          </td>
+          <td><span style="color:#58a6ff; font-weight:600; text-transform:uppercase;">MP4 (H.264+AAC)</span></td>
+          <td>${item.estimated_total_filesize_formatted || 'N/A'}</td>
+          <td class="actions-cell">
+            ${zeroLoadBtn}
+            <button class="btn-action btn-play" onclick="playInBrowser('${item.stream_url}', '${qLabel}')">
+              ▶ Play
+            </button>
+            <a class="btn-action btn-download" href="${item.download_with_sound_url}" target="_blank">
+              ⬇ Download
+            </a>
+          </td>
+        `;
+        vBody.appendChild(tr);
+      });
+
+      // Populate Audio Table
+      const aBody = document.getElementById('audio-table-body');
+      aBody.innerHTML = '';
+      const audios = data.audio_formats || [];
+      document.getElementById('audio-count').innerText = `${audios.length} tracks`;
+
+      audios.forEach(item => {
+        const tr = document.createElement('tr');
+        const codec = (item.acodec || 'audio').toUpperCase();
+        const ext = (item.ext || '').toUpperCase();
+        const bitrate = item.abr ? `${Math.round(item.abr)} kbps` : 'N/A';
+
+        tr.innerHTML = `
+          <td><strong>${ext}</strong> <span style="color:var(--text-muted); font-size:11px;">(${codec})</span></td>
+          <td><span style="color: #3fb950; font-weight:600;">${bitrate}</span></td>
+          <td>${item.filesize_formatted || 'N/A'}</td>
+          <td class="actions-cell">
+            <button class="btn-action btn-play" onclick="playInBrowser('${item.stream_url}', 'Audio (${bitrate})')">
+              ▶ Play
+            </button>
+            <a class="btn-action btn-download" href="${item.stream_url}" download="audio.${item.ext || 'mp3'}">
+              ⬇ Download
+            </a>
+          </td>
+        `;
+        aBody.appendChild(tr);
+      });
+
+      document.getElementById('result').style.display = 'flex';
+      document.getElementById('result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+      // Auto-preview top video instantly (Zero delay, full audio & HD)
+      if (meta && meta.id) {
+        playInstantVideo(meta.id, meta.title);
+      }
+    }
+
+    let currentPlayingId = null;
+    let currentRawStreamUrl = null;
+    let isIframeMode = true;
+
+    function playInstantVideo(videoId, title) {
+      currentPlayingId = videoId;
+      isIframeMode = true;
+      const playerContainer = document.getElementById('player-container');
+      const iframe = document.getElementById('instant-iframe');
+      const htmlPlayer = document.getElementById('html-player');
+      const status = document.getElementById('player-status');
+      const toggleBtn = document.getElementById('btn-toggle-player');
+
+      status.innerHTML = `⚡ <strong>Instant Playback:</strong> ${title || 'Video'} (Zero Wait)`;
+      toggleBtn.innerText = "Switch to Raw Stream";
+      toggleBtn.style.display = "inline-block";
+
+      htmlPlayer.pause();
+      htmlPlayer.src = '';
+      htmlPlayer.style.display = 'none';
+
+      iframe.src = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&rel=0`;
+      iframe.style.display = 'block';
+
+      playerContainer.style.display = 'block';
+      playerContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    function playInBrowser(streamUrl, label) {
+      currentRawStreamUrl = streamUrl;
+      isIframeMode = false;
+      const playerContainer = document.getElementById('player-container');
+      const iframe = document.getElementById('instant-iframe');
+      const htmlPlayer = document.getElementById('html-player');
+      const status = document.getElementById('player-status');
+      const toggleBtn = document.getElementById('btn-toggle-player');
+
+      status.innerHTML = `🎬 <strong>Raw Stream:</strong> ${label || 'Video'} (With Muxed Sound)`;
+      toggleBtn.innerText = "Switch to Instant Play";
+      toggleBtn.style.display = currentPlayingId ? "inline-block" : "none";
+
+      iframe.src = '';
+      iframe.style.display = 'none';
+
+      htmlPlayer.style.display = 'block';
+      htmlPlayer.src = streamUrl;
+      playerContainer.style.display = 'block';
+      playerContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      htmlPlayer.play().catch(() => {});
+    }
+
+    function togglePlayerMode() {
+      if (isIframeMode) {
+        if (currentRawStreamUrl) {
+          playInBrowser(currentRawStreamUrl, "Server Stream");
+        } else if (currentRawJson && currentRawJson.paired_video_audio && currentRawJson.paired_video_audio.length > 0) {
+          const top = currentRawJson.paired_video_audio[0];
+          playInBrowser(top.stream_url, top.quality_label);
+        }
+      } else {
+        if (currentPlayingId) {
+          playInstantVideo(currentPlayingId, currentRawJson?.metadata?.title);
+        }
+      }
+    }
+
+    function closePlayer() {
+      const player = document.getElementById('html-player');
+      const iframe = document.getElementById('instant-iframe');
+      player.pause();
+      player.src = '';
+      iframe.src = '';
+      document.getElementById('player-container').style.display = 'none';
+    }
+
+    function copyJsonData() {
+      if (!currentRawJson) return;
+      navigator.clipboard.writeText(JSON.stringify(currentRawJson, null, 2)).then(() => {
+        alert('JSON copied to clipboard!');
+      }).catch(() => {
+        alert('Failed to copy. Please copy manually.');
+      });
+    }
+
+    function downloadJsonData() {
+      if (!currentRawJson) return;
+      const blob = new Blob([JSON.stringify(currentRawJson, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `video_info_${currentRawJson.metadata?.id || 'data'}.json`;
+      a.click();
+    }
+
+    function formatDate(str) {
+      if (!str || str.length !== 8) return str;
+      return `${str.substring(0, 4)}-${str.substring(4, 6)}-${str.substring(6, 8)}`;
+    }
+  </script>
+</body>
+</html>
