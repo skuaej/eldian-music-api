@@ -155,7 +155,7 @@ def get_ydl_opts(proxy: Optional[str] = None, cookiefile: Optional[str] = None, 
         "no_warnings": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["web_embedded", "web_creator"]
+                "player_client": ["web_embedded"]
             }
         },
         "js_runtimes": {
@@ -163,14 +163,19 @@ def get_ydl_opts(proxy: Optional[str] = None, cookiefile: Optional[str] = None, 
             "deno": {}
         },
         "skip_download": True,
-        "ignore_no_formats_error": True,
+        "socket_timeout": 15,
     }
 
     if proxy:
         opts["proxy"] = proxy
 
-    if use_cookies and cookiefile and os.path.exists(cookiefile):
-        opts["cookiefile"] = cookiefile
+    if use_cookies:
+        if cookiefile and os.path.exists(cookiefile):
+            opts["cookiefile"] = cookiefile
+        else:
+            default_c = failover.get_current_cookie()
+            if default_c and os.path.exists(default_c):
+                opts["cookiefile"] = default_c
 
     return opts
 
@@ -407,30 +412,41 @@ def extract_all_infodata(url: str, disable_proxy: bool = False, base_url: str = 
 
     # 2. FAILOVER RETRY LOOP ACROSS ROTATING PROXIES AND COOKIES
     failover.refresh()
-    proxies_to_try = [None] if disable_proxy else (failover.proxies if failover.proxies else [None])
-    cookies_to_try = failover.cookies if failover.cookies else [None]
+    available_proxies = failover.proxies if (failover.proxies and not disable_proxy) else []
+    # Try configured proxies first, with direct connection (None) as safety fallback
+    proxies_to_try = (available_proxies + [None]) if available_proxies else [None]
+    cookies_to_try = (failover.cookies + [None]) if failover.cookies else [None]
 
     last_error = None
     info = None
 
-    for attempt in range(max(len(proxies_to_try) * len(cookies_to_try), 1)):
+    for attempt in range(max(len(proxies_to_try) * len(cookies_to_try), 2)):
         active_proxy = None if disable_proxy else failover.get_current_proxy()
         active_cookie = failover.get_current_cookie()
         ydl_opts = get_ydl_opts(proxy=active_proxy, cookiefile=active_cookie)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info and info.get("formats"):
-                    break
+                candidate = ydl.extract_info(url, download=False)
+                if candidate and candidate.get("formats"):
+                    real_formats = [
+                        f for f in candidate.get("formats", [])
+                        if f.get("ext") != "mhtml" and f.get("url") and (f.get("vcodec") not in (None, "none") or f.get("acodec") not in (None, "none"))
+                    ]
+                    if len(real_formats) >= 1:
+                        info = candidate
+                        break
+                    else:
+                        print(f"[FAILOVER] Proxy {active_proxy} with cookie {active_cookie} returned 0 streamable formats, rotating...")
+                        failover.rotate_cookie()
+                        failover.rotate_proxy()
         except Exception as e:
             err_msg = str(e)
             print(f"[FAILOVER] Error on proxy {active_proxy}, cookie {active_cookie}: {err_msg}")
             last_error = err_msg
-            # Rotate cookie on bot check / sign in / rate limit
-            if "Sign in" in err_msg or "bot" in err_msg.lower() or "rate-limit" in err_msg.lower() or "429" in err_msg:
+            # Rotate cookie on bot check / sign in / rate limit / reload error
+            if any(term in err_msg.lower() for term in ["sign in", "bot", "rate-limit", "429", "reload", "confirm"]):
                 failover.rotate_cookie()
-            # Rotate proxy on network/connect/timeout/403 errors
             failover.rotate_proxy()
 
     if not info:
