@@ -19,6 +19,22 @@ app = FastAPI(
 
 COOKIES_FILE = os.environ.get("COOKIES_FILE", os.path.join(os.path.dirname(__file__), "cookies.txt"))
 PROXY_URL = os.environ.get("PROXY_URL", "socks5://03wwyzpv5xek:nzjfrugmo40zp4d@65.111.10.198:1081")
+PUBLIC_URL = os.environ.get("PUBLIC_URL") or os.environ.get("RAILWAY_STATIC_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+
+def get_effective_base_url(request: Optional[Request] = None) -> str:
+    if PUBLIC_URL:
+        url = PUBLIC_URL.strip()
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = f"https://{url}"
+        return url.rstrip('/')
+    if request:
+        proto = request.headers.get("x-forwarded-proto")
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+        if host:
+            scheme = proto if proto else request.url.scheme
+            return f"{scheme}://{host}".rstrip('/')
+        return str(request.base_url).rstrip('/')
+    return "http://127.0.0.1:8000"
 
 def format_bytes(size: Optional[int]) -> Optional[str]:
     if not size:
@@ -424,17 +440,20 @@ def root_web():
 
 @app.get("/api/status")
 def api_status(request: Request):
-    base_url = str(request.base_url).rstrip('/')
+    base_url = get_effective_base_url(request)
     return {
         "status": "online",
-        "service": "yt-dlp JSON Link Extractor API (With Sound Streaming Up to 8K)",
+        "service": "yt-dlp Video & Audio Streaming API (Railway / Koyeb / Render)",
+        "server_base_url": base_url,
         "endpoints": {
             "web_ui": f"{base_url}/",
+            "streams_only_audio_and_video": f"{base_url}/api/streams?url=<YOUTUBE_URL>",
             "infodata_all_formats": f"{base_url}/infodata?url=<URL>",
             "api_infodata": f"{base_url}/api/infodata?url=<URL>",
             "stream_video_with_sound": f"{base_url}/api/stream_video?url=<URL>&quality=1080p",
             "download_with_sound": f"{base_url}/api/download?url=<URL>&quality=1080p",
-            "proxy_raw_stream": f"{base_url}/api/stream?url=<GOOGLEVIDEO_URL>",
+            "stream_audio": f"{base_url}/api/stream_audio?url=<URL>&format_id=140",
+            "search": f"{base_url}/api/search?q=<QUERY>",
             "docs": f"{base_url}/docs"
         }
     }
@@ -653,7 +672,7 @@ def get_infodata(
     disable_proxy: bool = Query(False, description="Set to true to bypass proxy"),
     request: Request = None
 ):
-    base_url = str(request.base_url).rstrip('/') if request else "http://127.0.0.1:8000"
+    base_url = get_effective_base_url(request)
     try:
         return extract_all_infodata(url, disable_proxy, base_url)
     except HTTPException:
@@ -664,7 +683,7 @@ def get_infodata(
 @app.post("/infodata")
 @app.post("/api/infodata")
 def post_infodata(req: InfoDataRequest, request: Request = None):
-    base_url = str(request.base_url).rstrip('/') if request else "http://127.0.0.1:8000"
+    base_url = get_effective_base_url(request)
     try:
         return extract_all_infodata(req.url, req.disable_proxy, base_url)
     except HTTPException:
@@ -678,7 +697,7 @@ def get_video_info(
     disable_proxy: bool = Query(False, description="Set to true to bypass proxy"),
     request: Request = None
 ):
-    base_url = str(request.base_url).rstrip('/') if request else "http://127.0.0.1:8000"
+    base_url = get_effective_base_url(request)
     try:
         data = extract_all_infodata(url, disable_proxy, base_url)
         return {
@@ -693,6 +712,73 @@ def get_video_info(
                 "video_only": data["video_formats_upto_8k"],
                 "audio_only": data["audio_formats"],
             }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/streams")
+@app.get("/api/railway/streams")
+def get_streams_only(
+    url: str = Query(..., description="YouTube video URL or ID"),
+    disable_proxy: bool = Query(False, description="Set to true to bypass proxy"),
+    request: Request = None
+):
+    """
+    Dedicated endpoint that ONLY returns clean stream links hosted on your Railway/Server URL:
+    - Video streams with sound muxed (8k down to 144p)
+    - Audio streams (highest bitrate down to lowest)
+    """
+    base_url = get_effective_base_url(request)
+    encoded_video_url = urllib.parse.quote(url, safe='')
+
+    try:
+        data = extract_all_infodata(url, disable_proxy, base_url)
+        meta = data.get("metadata", {})
+        
+        # 1. Clean list of video streams with audio combined
+        clean_videos = []
+        seen_qualities = set()
+        for p in data.get("paired_video_audio", []):
+            q_label = p.get("quality_label")
+            if q_label in seen_qualities:
+                continue
+            seen_qualities.add(q_label)
+            clean_videos.append({
+                "quality": q_label,
+                "height": p.get("height"),
+                "container": "mp4",
+                "estimated_size": p.get("estimated_total_filesize_formatted"),
+                "stream_url": p.get("stream_with_sound_url"),
+                "download_url": p.get("download_with_sound_url")
+            })
+
+        # 2. Clean list of audio streams
+        clean_audios = []
+        for a in data.get("audio_formats", []):
+            clean_audios.append({
+                "format_id": a.get("format_id"),
+                "ext": a.get("ext") or "mp3",
+                "codec": a.get("acodec"),
+                "bitrate": f"{round(a.get('abr'))} kbps" if a.get("abr") else "Unknown",
+                "filesize": a.get("filesize_formatted"),
+                "stream_url": f"{base_url}/api/stream_audio?url={encoded_video_url}&format_id={a.get('format_id')}"
+            })
+
+        return {
+            "success": True,
+            "server_base_url": base_url,
+            "video_info": {
+                "id": meta.get("id"),
+                "title": meta.get("title"),
+                "channel": meta.get("channel"),
+                "duration": meta.get("duration_formatted"),
+                "thumbnail": meta.get("thumbnail"),
+            },
+            # ONLY STREAM LINKS HOSTED ON YOUR SERVER / RAILWAY:
+            "video_streams_with_sound": clean_videos,
+            "audio_streams": clean_audios
         }
     except HTTPException:
         raise

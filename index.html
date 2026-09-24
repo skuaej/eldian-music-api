@@ -654,6 +654,9 @@
           <button class="tab-btn" onclick="switchTab('tab-json')">
             📋 JSON Data List
           </button>
+          <button class="tab-btn" onclick="switchTab('tab-railway')">
+            ⚡ Streams Only (Audio + Video)
+          </button>
         </div>
 
         <!-- TAB 1: VIDEO (WITH SOUND COMBINED) -->
@@ -710,6 +713,21 @@
             </div>
           </div>
           <pre class="json-display" id="json-viewer">// JSON data will appear here after fetching</pre>
+        </div>
+
+        <!-- TAB 4: CLEAN STREAMS ONLY (RAILWAY / SERVER HOSTED) -->
+        <div id="tab-railway" class="tab-pane">
+          <div class="json-header-bar">
+            <span style="font-size: 14px; font-weight: 600; color: #58a6ff;">
+              🚀 Clean Streams Endpoint: <code>/api/streams?url=...</code>
+            </span>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-json-action" onclick="copyStreamsJson()">
+                📋 Copy Streams JSON
+              </button>
+            </div>
+          </div>
+          <pre class="json-display" id="streams-viewer">// Clean stream links will appear here</pre>
         </div>
       </div>
     </div>
@@ -861,6 +879,36 @@
 
       // Render JSON Viewer Tab
       document.getElementById('json-viewer').innerText = JSON.stringify(data, null, 2);
+
+      // Render Streams Only Tab (Railway / Server streams)
+      const cleanStreamsObj = {
+        success: true,
+        video_info: {
+          id: meta.id,
+          title: meta.title,
+          channel: meta.channel,
+          duration: meta.duration_formatted,
+          thumbnail: meta.thumbnail
+        },
+        video_streams_with_sound: (data.paired_video_audio || []).map(p => ({
+          quality: p.quality_label,
+          height: p.height,
+          container: "mp4",
+          estimated_size: p.estimated_total_filesize_formatted,
+          stream_url: p.stream_with_sound_url,
+          download_url: p.download_with_sound_url
+        })),
+        audio_streams: (data.audio_formats || []).map(a => ({
+          format_id: a.format_id,
+          ext: a.ext || "mp3",
+          codec: a.acodec,
+          bitrate: a.abr ? Math.round(a.abr) + " kbps" : "Unknown",
+          filesize: a.filesize_formatted,
+          stream_url: a.stream_url
+        }))
+      };
+      window.currentStreamsJson = cleanStreamsObj;
+      document.getElementById('streams-viewer').innerText = JSON.stringify(cleanStreamsObj, null, 2);
 
       // Populate Video Table (Paired Video+Audio with Sound)
       const vBody = document.getElementById('video-table-body');
@@ -1023,6 +1071,15 @@
       if (!currentRawJson) return;
       navigator.clipboard.writeText(JSON.stringify(currentRawJson, null, 2)).then(() => {
         alert('JSON copied to clipboard!');
+      }).catch(() => {
+        alert('Failed to copy. Please copy manually.');
+      });
+    }
+
+    function copyStreamsJson() {
+      if (!window.currentStreamsJson) return;
+      navigator.clipboard.writeText(JSON.stringify(window.currentStreamsJson, null, 2)).then(() => {
+        alert('Clean Streams JSON copied to clipboard!');
       }).catch(() => {
         alert('Failed to copy. Please copy manually.');
       });
