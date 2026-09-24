@@ -331,14 +331,47 @@ def get_or_create_audio(url: str, format_id: str, disable_proxy: bool = False) -
     raise HTTPException(status_code=500, detail="Failed to extract audio track.")
 
 
+def _rewrite_base_urls(data: dict, base_url: str) -> dict:
+    """Rewrite all server URLs in cached data to use the current base_url."""
+    import copy, re
+    result = copy.deepcopy(data)
+    encoded_video_url_pattern = re.compile(r'https?://[^/]+(/api/)')
+
+    def rewrite_str(s: str) -> str:
+        if not isinstance(s, str):
+            return s
+        # Match any http(s)://host:port/api/ pattern and replace with current base_url
+        return re.sub(r'https?://[^/]+/api/', f'{base_url}/api/', s)
+
+    def rewrite_dict(d):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if isinstance(v, str) and '/api/' in v:
+                    d[k] = rewrite_str(v)
+                elif isinstance(v, dict):
+                    rewrite_dict(v)
+                elif isinstance(v, list):
+                    rewrite_list(v)
+        return d
+
+    def rewrite_list(lst):
+        for i, item in enumerate(lst):
+            if isinstance(item, dict):
+                rewrite_dict(item)
+            elif isinstance(item, str) and '/api/' in item:
+                lst[i] = rewrite_str(item)
+
+    return rewrite_dict(result)
+
 def extract_all_infodata(url: str, disable_proxy: bool = False, base_url: str = "http://127.0.0.1:8000"):
     encoded_video_url = urllib.parse.quote(url, safe='')
-    cache_key = f"{url}_base_{base_url}"
+    cache_key = f"{url}"
 
     # 1. CHECK MONGODB CACHE (Instant response & prevents rate limits)
     cached = get_cached_metadata(cache_key)
     if cached:
-        return cached
+        # Always rewrite URLs to match the CURRENT server base_url
+        return _rewrite_base_urls(cached, base_url)
 
     # 2. FAILOVER RETRY LOOP ACROSS ROTATING PROXIES AND COOKIES
     failover.refresh()
@@ -601,6 +634,14 @@ def api_status(request: Request):
             "docs": f"{base_url}/docs"
         }
     }
+
+@app.get("/api/clear_cache")
+def clear_cache():
+    """Clear all MongoDB cached entries. Use after deployment to remove stale localhost URLs."""
+    if mongo_coll is not None:
+        result = mongo_coll.delete_many({})
+        return {"success": True, "deleted_count": result.deleted_count}
+    return {"success": False, "reason": "MongoDB not connected"}
 
 @app.get("/api/search")
 def search_youtube(
